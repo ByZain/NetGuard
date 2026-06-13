@@ -1,0 +1,26 @@
+# Build output
+bin/
+obj/
+**/bin/
+**/obj/
+
+# Publish artifacts
+publish/
+publish-*/
+
+# User/local IDE files
+*.user
+.vs/
+.idea/
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Logs and temp files
+*.log
+*.tmp
+*.bak
+
+# OS files
+Thumbs.db
+Desktop.ini
