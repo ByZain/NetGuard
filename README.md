@@ -105,17 +105,19 @@ These are shown as hints only. NetGuard does not automatically close related pro
 
 `UploadLimiter` uses Windows Policy-based QoS through the built-in PowerShell `NetQos` module.
 
-For the selected executable path, NetGuard creates an ActiveStore QoS policy:
+For the selected executable, NetGuard creates an ActiveStore QoS policy. The QoS application match uses the executable file name, while NetGuard keeps a full-path hash in the policy name so it can find and remove the policy later:
 
 ```powershell
 New-NetQosPolicy `
   -Name NetGuard_<hash>_<rate>KBps `
-  -AppPathNameMatchCondition <exe-path> `
+  -AppPathNameMatchCondition <app.exe> `
   -ThrottleRateActionBitsPerSecond <bits-per-second> `
   -PolicyStore ActiveStore
 ```
 
 The policy is stored in `ActiveStore`, so it is temporary and disappears after reboot. Users can also remove it with `取消限速`.
+
+Windows QoS is policy-based, not a per-socket packet shaper. In practice it is most reliable for new connections, so if an app is already uploading heavily, apply the limit, deep-close the app, and then start it again.
 
 NetGuard scans current `NetGuard_*` and legacy `NetClean_*` policies so limited apps are marked in the table even after the app process exits and starts again.
 

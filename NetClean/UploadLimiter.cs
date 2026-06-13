@@ -24,18 +24,20 @@ internal static class UploadLimiter
         var policyName = GetPolicyName(appPath, kilobytesPerSecond);
         var policyPrefix = GetPolicyPrefix(appPath);
         var legacyPolicyName = GetLegacyPolicyName(appPath);
+        var appName = Path.GetFileName(appPath);
+
         var command = string.Join(Environment.NewLine,
             "$ErrorActionPreference = 'Stop'",
             "Import-Module NetQos",
             "$name = " + PowerShellString(policyName),
             "$prefix = " + PowerShellString(policyPrefix),
             "$legacy = " + PowerShellString(legacyPolicyName),
-            "$path = " + PowerShellString(appPath),
+            "$appName = " + PowerShellString(appName),
             "$existing = Get-NetQosPolicy -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object { $_.Name -like ($prefix + '*') -or $_.Name -eq $legacy }",
             "foreach ($item in @($existing)) {",
             "    Remove-NetQosPolicy -Name $item.Name -PolicyStore ActiveStore -Confirm:$false",
             "}",
-            $"New-NetQosPolicy -Name $name -AppPathNameMatchCondition $path -ThrottleRateActionBitsPerSecond {bitsPerSecond} -PolicyStore ActiveStore | Out-Null");
+            $"New-NetQosPolicy -Name $name -AppPathNameMatchCondition $appName -ThrottleRateActionBitsPerSecond {bitsPerSecond} -PolicyStore ActiveStore | Out-Null");
 
         var result = RunPowerShell(command);
         if (!result.Succeeded)
@@ -43,7 +45,11 @@ internal static class UploadLimiter
             return UploadLimitResult.Fail($"限速失败：{result.Output}");
         }
 
-        return UploadLimitResult.Success($"已限制上传：{kilobytesPerSecond} KB/s。\n策略名：{policyName}\n注意：该策略保存在 Windows ActiveStore，重启后会失效，也可以点“取消限速”移除。");
+        return UploadLimitResult.Success(
+            $"已限制上传：{kilobytesPerSecond} KB/s。\n" +
+            $"匹配程序：{appName}\n" +
+            $"策略名：{policyName}\n\n" +
+            "注意：Windows QoS 通常只会稳定影响新建连接。若当前上传没有立刻降下来，请先深度关闭该程序，再重新打开它。");
     }
 
     public static UploadLimitResult ClearLimit(string appPath)
@@ -86,15 +92,15 @@ internal static class UploadLimiter
             "Import-Module NetQos",
             "$items = Get-NetQosPolicy -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'NetGuard_*' -or $_.Name -like 'NetClean_*' }",
             "$result = foreach ($p in @($items)) {",
-            "    $path = $null",
+            "    $app = $null",
             "    foreach ($prop in @('AppPathNameMatchCondition', 'AppPathName')) {",
-            "        if ($p.PSObject.Properties[$prop] -and $p.$prop) { $path = [string]$p.$prop; break }",
+            "        if ($p.PSObject.Properties[$prop] -and $p.$prop) { $app = [string]$p.$prop; break }",
             "    }",
             "    $rate = $null",
             "    foreach ($prop in @('ThrottleRateActionBitsPerSecond', 'ThrottleRate')) {",
             "        if ($p.PSObject.Properties[$prop] -and $p.$prop) { $rate = [string]$p.$prop; break }",
             "    }",
-            "    [pscustomobject]@{ Name = [string]$p.Name; Path = [string]$path; Rate = [string]$rate }",
+            "    [pscustomobject]@{ Name = [string]$p.Name; App = [string]$app; Rate = [string]$rate }",
             "}",
             "@($result) | ConvertTo-Json -Compress");
 
@@ -110,14 +116,14 @@ internal static class UploadLimiter
             var limits = new Dictionary<string, UploadLimitInfo>(StringComparer.OrdinalIgnoreCase);
             foreach (var policy in policies)
             {
-                if (string.IsNullOrWhiteSpace(policy.Path))
+                if (string.IsNullOrWhiteSpace(policy.App))
                 {
                     continue;
                 }
 
-                limits[policy.Path] = new UploadLimitInfo(
+                limits[policy.App] = new UploadLimitInfo(
                     policy.Name ?? "",
-                    policy.Path,
+                    policy.App,
                     TryReadKilobytesPerSecond(policy.Name, policy.Rate));
             }
 
@@ -248,7 +254,7 @@ internal sealed record PowerShellResult(bool Succeeded, string Output);
 
 internal sealed record UploadLimitInfo(
     string PolicyName,
-    string Path,
+    string AppName,
     int? KilobytesPerSecond)
 {
     public string DisplayText => KilobytesPerSecond.HasValue ? $"{KilobytesPerSecond.Value} KB/s" : "已限速";
@@ -257,6 +263,6 @@ internal sealed record UploadLimitInfo(
 internal sealed class QosPolicyDto
 {
     public string? Name { get; set; }
-    public string? Path { get; set; }
+    public string? App { get; set; }
     public string? Rate { get; set; }
 }

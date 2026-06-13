@@ -485,8 +485,19 @@ internal sealed class MainForm : Form
 
     private UploadLimitInfo? GetUploadLimit(string path)
     {
-        return !string.IsNullOrWhiteSpace(path) && _uploadLimits.TryGetValue(path, out var limit)
-            ? limit
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        if (_uploadLimits.TryGetValue(path, out var fullPathLimit))
+        {
+            return fullPathLimit;
+        }
+
+        var appName = Path.GetFileName(path);
+        return !string.IsNullOrWhiteSpace(appName) && _uploadLimits.TryGetValue(appName, out var appNameLimit)
+            ? appNameLimit
             : null;
     }
 
