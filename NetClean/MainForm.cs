@@ -147,6 +147,7 @@ internal sealed class MainForm : Form
         _grid.RowHeadersVisible = false;
         _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        _grid.ShowCellToolTips = false;
 
         _grid.Columns.Add(CreateTextColumn("Program", "程序", 190));
         _grid.Columns.Add(CreateTextColumn("ProcessTag", "标记", 90));
