@@ -20,6 +20,7 @@ internal sealed class MainForm : Form
     private List<TrafficRow> _currentRows = [];
     private Dictionary<string, UploadLimitInfo> _uploadLimits = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _nextLimitRefreshUtc = DateTime.MinValue;
+    private bool _isRefreshingRows;
     private bool _isRefreshingLimits;
     private string _sortProperty = nameof(TrafficRow.UploadBytesPerSecond);
     private SortOrder _sortOrder = SortOrder.Descending;
@@ -148,6 +149,7 @@ internal sealed class MainForm : Form
         _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         _grid.ShowCellToolTips = false;
+        EnableDoubleBuffering(_grid);
 
         _grid.Columns.Add(CreateTextColumn("Program", "程序", 190));
         _grid.Columns.Add(CreateTextColumn("ProcessTag", "标记", 90));
@@ -160,46 +162,6 @@ internal sealed class MainForm : Form
         _grid.Columns.Add(CreateTextColumn("LastSeen", "最后活动", 115, DataGridViewContentAlignment.MiddleLeft, nameof(TrafficRow.LastSeenAt)));
         _grid.Columns.Add(CreateTextColumn("Path", "路径", 360));
 
-        _grid.CellFormatting += (_, e) =>
-        {
-            if (e.RowIndex < 0 || _grid.Rows[e.RowIndex].DataBoundItem is not TrafficRow row)
-            {
-                return;
-            }
-
-            _grid.Rows[e.RowIndex].DefaultCellStyle.ForeColor = row.IsCriticalSystemProcess || !row.IsRunning
-                ? Color.DimGray
-                : SystemColors.ControlText;
-
-            if (!row.IsRunning)
-            {
-                _grid.Rows[e.RowIndex].DefaultCellStyle.BackColor = Color.FromArgb(245, 245, 245);
-            }
-            else if (row.IsUploadLimited)
-            {
-                _grid.Rows[e.RowIndex].DefaultCellStyle.BackColor = Color.FromArgb(232, 248, 238);
-            }
-            else if (row.UploadBytesPerSecond >= 1024 * 1024)
-            {
-                _grid.Rows[e.RowIndex].DefaultCellStyle.BackColor = Color.FromArgb(255, 238, 238);
-            }
-            else if (row.UploadBytesPerSecond >= 128 * 1024)
-            {
-                _grid.Rows[e.RowIndex].DefaultCellStyle.BackColor = Color.FromArgb(255, 248, 225);
-            }
-            else if (row.IsCriticalSystemProcess)
-            {
-                _grid.Rows[e.RowIndex].DefaultCellStyle.BackColor = Color.FromArgb(240, 242, 245);
-            }
-            else if (row.IsSystemProcess)
-            {
-                _grid.Rows[e.RowIndex].DefaultCellStyle.BackColor = Color.FromArgb(238, 246, 255);
-            }
-            else
-            {
-                _grid.Rows[e.RowIndex].DefaultCellStyle.BackColor = SystemColors.Window;
-            }
-        };
     }
 
     private static DataGridViewTextBoxColumn CreateTextColumn(
@@ -221,6 +183,65 @@ internal sealed class MainForm : Form
         };
     }
 
+    private static void EnableDoubleBuffering(DataGridView grid)
+    {
+        typeof(DataGridView)
+            .GetProperty("DoubleBuffered", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?.SetValue(grid, true, null);
+    }
+
+    private void ApplyRowStyles()
+    {
+        foreach (DataGridViewRow gridRow in _grid.Rows)
+        {
+            if (gridRow.DataBoundItem is not TrafficRow row)
+            {
+                continue;
+            }
+
+            gridRow.DefaultCellStyle.ForeColor = row.IsCriticalSystemProcess || !row.IsRunning
+                ? Color.DimGray
+                : SystemColors.ControlText;
+
+            gridRow.DefaultCellStyle.BackColor = GetRowBackColor(row);
+        }
+    }
+
+    private static Color GetRowBackColor(TrafficRow row)
+    {
+        if (!row.IsRunning)
+        {
+            return Color.FromArgb(245, 245, 245);
+        }
+
+        if (row.IsUploadLimited)
+        {
+            return Color.FromArgb(232, 248, 238);
+        }
+
+        if (row.UploadBytesPerSecond >= 1024 * 1024)
+        {
+            return Color.FromArgb(255, 238, 238);
+        }
+
+        if (row.UploadBytesPerSecond >= 128 * 1024)
+        {
+            return Color.FromArgb(255, 248, 225);
+        }
+
+        if (row.IsCriticalSystemProcess)
+        {
+            return Color.FromArgb(240, 242, 245);
+        }
+
+        if (row.IsSystemProcess)
+        {
+            return Color.FromArgb(238, 246, 255);
+        }
+
+        return SystemColors.Window;
+    }
+
     private void WireEvents()
     {
         _monitor.StatusChanged += message =>
@@ -233,7 +254,7 @@ internal sealed class MainForm : Form
             BeginInvoke(() => SetStatus(message, message.Contains("停止", StringComparison.Ordinal) ? Color.Firebrick : Color.DimGray));
         };
 
-        _refreshTimer.Interval = 1000;
+        _refreshTimer.Interval = 1500;
         _refreshTimer.Tick += (_, _) => RefreshRows();
 
         _filterBox.TextChanged += (_, _) => ApplyGridDataSource();
@@ -270,15 +291,56 @@ internal sealed class MainForm : Form
 
     private void RefreshRows()
     {
-        RefreshUploadLimitCacheIfDue();
-        var snapshots = _monitor.ReadSnapshots();
-        _currentRows = snapshots.Select(snapshot =>
+        _ = RefreshRowsAsync();
+    }
+
+    private async Task RefreshRowsAsync()
+    {
+        if (_isRefreshingRows || IsDisposed)
         {
-            var runState = ProcessInspector.GetRunState(snapshot.ProcessId);
-            var uploadLimit = GetUploadLimit(snapshot.Path);
+            return;
+        }
+
+        RefreshUploadLimitCacheIfDue();
+        _isRefreshingRows = true;
+        var uploadLimits = new Dictionary<string, UploadLimitInfo>(_uploadLimits, StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            var result = await Task.Run(() => BuildRows(uploadLimits));
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            _currentRows = result.Rows;
+            _summaryLabel.Text = $"当前上传：{Formatters.FormatBytesPerSecond(result.TotalUploadBytesPerSecond)}";
+            ApplyGridDataSource();
+        }
+        catch (Exception ex)
+        {
+            if (!IsDisposed)
+            {
+                SetStatus($"刷新列表失败：{ex.Message}", Color.Firebrick);
+            }
+        }
+        finally
+        {
+            _isRefreshingRows = false;
+        }
+    }
+
+    private RowsRefreshResult BuildRows(IReadOnlyDictionary<string, UploadLimitInfo> uploadLimits)
+    {
+        var snapshots = _monitor.ReadSnapshots();
+        var runningPids = ProcessInspector.GetRunningProcessIds();
+        var rows = snapshots.Select(snapshot =>
+        {
+            var isRunning = runningPids.Contains(snapshot.ProcessId);
+            var uploadLimit = GetUploadLimit(uploadLimits, snapshot.Path);
             return new TrafficRow
             {
-                Status = runState.Status,
+                Status = isRunning ? "运行中" : "已退出",
                 Pid = snapshot.ProcessId,
                 Program = snapshot.DisplayName,
                 ProcessName = snapshot.ProcessName,
@@ -295,14 +357,12 @@ internal sealed class MainForm : Form
                 LastSeenAt = snapshot.LastSeen,
                 IsSystemProcess = snapshot.IsSystemProcess,
                 IsCriticalSystemProcess = snapshot.IsCriticalSystemProcess,
-                IsRunning = runState.IsRunning,
+                IsRunning = isRunning,
                 IsUploadLimited = uploadLimit is not null
             };
         }).ToList();
 
-        var totalUpload = _currentRows.Sum(row => row.UploadBytesPerSecond);
-        _summaryLabel.Text = $"当前上传：{Formatters.FormatBytesPerSecond(totalUpload)}";
-        ApplyGridDataSource();
+        return new RowsRefreshResult(rows, rows.Sum(row => row.UploadBytesPerSecond));
     }
 
     private void ApplyGridDataSource()
@@ -323,20 +383,29 @@ internal sealed class MainForm : Form
                 row.Path.Contains(filter, StringComparison.CurrentCultureIgnoreCase));
         }
 
-        _grid.DataSource = SortRows(rows).ToList();
-        UpdateSortGlyph();
-
-        if (selectedPid.HasValue)
+        _grid.SuspendLayout();
+        try
         {
-            foreach (DataGridViewRow gridRow in _grid.Rows)
+            _grid.DataSource = SortRows(rows).ToList();
+            UpdateSortGlyph();
+            ApplyRowStyles();
+
+            if (selectedPid.HasValue)
             {
-                if (gridRow.DataBoundItem is TrafficRow row && row.Pid == selectedPid.Value)
+                foreach (DataGridViewRow gridRow in _grid.Rows)
                 {
-                    gridRow.Selected = true;
-                    _grid.CurrentCell = gridRow.Cells[0];
-                    break;
+                    if (gridRow.DataBoundItem is TrafficRow row && row.Pid == selectedPid.Value)
+                    {
+                        gridRow.Selected = true;
+                        _grid.CurrentCell = gridRow.Cells[0];
+                        break;
+                    }
                 }
             }
+        }
+        finally
+        {
+            _grid.ResumeLayout();
         }
     }
 
@@ -486,18 +555,23 @@ internal sealed class MainForm : Form
 
     private UploadLimitInfo? GetUploadLimit(string path)
     {
+        return GetUploadLimit(_uploadLimits, path);
+    }
+
+    private static UploadLimitInfo? GetUploadLimit(IReadOnlyDictionary<string, UploadLimitInfo> uploadLimits, string path)
+    {
         if (string.IsNullOrWhiteSpace(path))
         {
             return null;
         }
 
-        if (_uploadLimits.TryGetValue(path, out var fullPathLimit))
+        if (uploadLimits.TryGetValue(path, out var fullPathLimit))
         {
             return fullPathLimit;
         }
 
         var appName = Path.GetFileName(path);
-        return !string.IsNullOrWhiteSpace(appName) && _uploadLimits.TryGetValue(appName, out var appNameLimit)
+        return !string.IsNullOrWhiteSpace(appName) && uploadLimits.TryGetValue(appName, out var appNameLimit)
             ? appNameLimit
             : null;
     }
@@ -510,7 +584,7 @@ internal sealed class MainForm : Form
         }
 
         _isRefreshingLimits = true;
-        _nextLimitRefreshUtc = DateTime.UtcNow.AddSeconds(5);
+        _nextLimitRefreshUtc = DateTime.UtcNow.AddSeconds(30);
 
         _ = Task.Run(UploadLimiter.GetActiveLimits).ContinueWith(task =>
         {
@@ -527,8 +601,12 @@ internal sealed class MainForm : Form
                     {
                         if (task.Status == TaskStatus.RanToCompletion)
                         {
-                            _uploadLimits = new Dictionary<string, UploadLimitInfo>(task.Result, StringComparer.OrdinalIgnoreCase);
-                            ApplyGridDataSource();
+                            var refreshedLimits = new Dictionary<string, UploadLimitInfo>(task.Result, StringComparer.OrdinalIgnoreCase);
+                            if (!UploadLimitMapsEqual(_uploadLimits, refreshedLimits))
+                            {
+                                _uploadLimits = refreshedLimits;
+                                ApplyGridDataSource();
+                            }
                         }
                     }
                     finally
@@ -551,12 +629,34 @@ internal sealed class MainForm : Form
             _uploadLimits = new Dictionary<string, UploadLimitInfo>(
                 await Task.Run(UploadLimiter.GetActiveLimits),
                 StringComparer.OrdinalIgnoreCase);
-            _nextLimitRefreshUtc = DateTime.UtcNow.AddSeconds(5);
+            _nextLimitRefreshUtc = DateTime.UtcNow.AddSeconds(30);
         }
         catch
         {
-            _nextLimitRefreshUtc = DateTime.UtcNow.AddSeconds(5);
+            _nextLimitRefreshUtc = DateTime.UtcNow.AddSeconds(30);
         }
+    }
+
+    private static bool UploadLimitMapsEqual(
+        IReadOnlyDictionary<string, UploadLimitInfo> left,
+        IReadOnlyDictionary<string, UploadLimitInfo> right)
+    {
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        foreach (var (key, value) in left)
+        {
+            if (!right.TryGetValue(key, out var other)
+                || value.PolicyName != other.PolicyName
+                || value.KilobytesPerSecond != other.KilobytesPerSecond)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private async Task LimitSelectedUploadAsync()
@@ -678,4 +778,6 @@ internal sealed class MainForm : Form
         _statusLabel.Text = message;
         _statusLabel.ForeColor = color;
     }
+
+    private sealed record RowsRefreshResult(List<TrafficRow> Rows, long TotalUploadBytesPerSecond);
 }

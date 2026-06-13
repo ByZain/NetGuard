@@ -5,6 +5,29 @@ namespace NetClean;
 
 internal static class ProcessInspector
 {
+    public static HashSet<int> GetRunningProcessIds()
+    {
+        var processIds = new HashSet<int>();
+        foreach (var process in Process.GetProcesses())
+        {
+            using (process)
+            {
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        processIds.Add(process.Id);
+                    }
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        return processIds;
+    }
+
     public static ProcessRunState GetRunState(int pid)
     {
         try

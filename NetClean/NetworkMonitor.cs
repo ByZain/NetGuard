@@ -13,6 +13,7 @@ internal sealed class NetworkMonitor : IDisposable
     private TraceEventSession? _session;
     private Task? _processingTask;
     private long _lastSnapshotTicks = Stopwatch.GetTimestamp();
+    private DateTime _nextCacheTrimUtc = DateTime.MinValue;
     private bool _disposed;
 
     public event Action<string>? StatusChanged;
@@ -121,7 +122,11 @@ internal sealed class NetworkMonitor : IDisposable
                 lastSeen.ToLocalTime()));
         }
 
-        _processInfoCache.TrimMissingProcesses();
+        if (DateTime.UtcNow >= _nextCacheTrimUtc)
+        {
+            _processInfoCache.TrimMissingProcesses();
+            _nextCacheTrimUtc = DateTime.UtcNow.AddSeconds(30);
+        }
 
         return snapshots
             .OrderByDescending(item => item.UploadBytesPerSecond)
